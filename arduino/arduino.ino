@@ -1,57 +1,268 @@
+// #include <QueueArray.h>
+
 // #include <SoftwareSerial.h>
+#include <Servo.h>
+#include <DallasTemperature.h>
 #define LED LED_BUILTIN
+#define LED2 11
+#define LED3 6
+#define HEAT 7
 #define wifi Serial
-#define BUFFER_SIZE 256
-
-//SoftwareSerial wifi(7, 6); // RX, TX
+#define SERVO 10
+#define BUFFER_SIZE 64
+#define TEMPERATURE_BUFFER_SIZE 256
+#define i32 int32_t
 #define TIMEOUT 7000 // mS
+#define MessageQueueSize 8 // Must be power of 2
 
-//String buffer = "";
+struct Finder {
+  const char* value;
+  byte index;
+  byte length;
 
-void print(String msg) {
-  //buffer +=  "MSG: " + msg + ";";
-  //out.print(msg);
+  Finder (const char* needle) {
+    value = needle;
+    index = 0;
+    length = strlen(needle);
+  }
+
+  bool find() {
+    while(Serial.available()) {
+      if (find(Serial.read())) return true;
+    }
+    return false;
+  }
+  
+  bool find(char c) {
+    if (value[index] == c) {
+      // Eat
+      index++;
+
+      if (index == length) {
+        index == 0;
+        return true;
+      }
+    } else if (index == 0) {
+      // Eat
+    } else {
+      // Assume a "nice" needle string. This will not work for every possible string
+      index = 0;
+      return find(c);
+    }
+    return false;
+  }
+};
+
+enum Stage : i32 {
+  AlwaysOff = -1,
+  HeatToHigh = 0,
+  CoolToLow = 1,
+  KeepAtFinal = 2,
+  AlwaysOn = 3,
+};
+
+struct State {
+  float lowTemp;
+  float highTemp;
+  float finalTemp;
+  Stage stage;
+};
+
+// DS18B20 Temperature chip i/o
+OneWire ds(9);
+// Pass our oneWire reference to Dallas Temperature.
+DallasTemperature sensors(&ds);
+Servo myservo;
+
+Finder packetStart("+IPD,");
+
+State state = {
+  0.0f,
+  0.0f,
+  0.0f,
+  Stage::AlwaysOff
+};
+
+enum MessageType {
+  InvalidMessage,
+  SetState,
+  Fasten,
+  Unfasten,
+  EnableLED,
+  DisableLED,
+  GetTemperatures
+};
+
+struct Message {
+  State state;
+  MessageType type;
+  char channel;
+};
+
+void assert (bool shouldBeTrue) {
+  if (!shouldBeTrue) {
+    int end = millis() + 5000;
+    while(millis() < end) {
+      pulse(LED3, millis() / 100.0f);
+      pulse(LED2, millis() / 100.0f);
+      pulse(LED, millis() / 100.0f);
+    }
+  }
 }
 
-void println() {
-  //buffer += "\n";
-  //out.println();
-  flush();
+struct MessageQueue {
+  Message buffer[MessageQueueSize];
+  int start = 0;
+  int cnt = 0;
+
+  int count() {
+    return cnt;
+  }
+
+  bool isEmpty () {
+    return cnt == 0;
+  }
+  
+  bool isFull () {
+    return cnt == MessageQueueSize;
+  }
+  
+  void enqueue(Message& message) {
+    assert(!isFull());
+    buffer[start + cnt] = message;
+    cnt++;
+  }
+
+  Message dequeue() {
+    assert(cnt > 0);
+    int prevIndex = start;
+    start = (start + 1) & (MessageQueueSize - 1);
+    cnt--;
+    return buffer[prevIndex];
+  }
+};
+
+MessageQueue messageQueue;
+bool initComplete = false;
+
+static int maxT = 80;
+static int minT = 20;
+
+int messageDepth = 0;
+
+char compressTemperature(float t) {
+  int tmap = (int)((t - minT)*(255.0f/(maxT-minT)));
+  return (char)max(min(tmap, 255), 0);
 }
 
-void println(String msg) {
-  //buffer += "MSG: " + msg + ";\n";
-  //out.print(msg);
-  flush();
+float decompressTemperature(char t) {
+  return t * ((maxT - minT) / 255.0f) + minT;
 }
 
-void flush() {
-  //Serial.print(buffer);
-  //buffer = "";
+char temperatureBuffer[TEMPERATURE_BUFFER_SIZE];
+i32 temperatureIndex = 0;
+float lastTemperature = 0;
+unsigned long lastTemperatureTick = 0;
+unsigned long lastTemperaturePollTick = 0;
+bool conversionIsComplete = false;
+DeviceAddress temperatureProbeAddress;
+float speed = 0;
+float targetSpeed = 1;
+#define NORMAL_SPEED 1
+#define SPEED_MULTIPLIER 100
+#define SPEED_ZERO 1505
+
+bool tickHeat () {
+  switch(state.stage) {
+    case HeatToHigh:
+      if (lastTemperature > state.highTemp) state.stage = CoolToLow;
+      return true;
+    case CoolToLow:
+      if (lastTemperature < state.lowTemp) state.stage = KeepAtFinal;
+      return false;
+    case KeepAtFinal:
+      return lastTemperature < state.finalTemp;
+    case AlwaysOn:
+      return true;
+    case AlwaysOff:
+    default:
+      return false;
+  }
+}
+
+unsigned long lastSpeedTick = 0;
+void tickSpeed () {
+  unsigned long dt = millis() - lastSpeedTick;
+  lastSpeedTick = millis();
+
+  targetSpeed += (NORMAL_SPEED - targetSpeed)*0.0001*dt;
+  speed += (targetSpeed - speed)*0.001*dt;
+  myservo.write(speed * SPEED_MULTIPLIER + SPEED_ZERO);
+}
+
+void testForSanity() {
+  if (abs(decompressTemperature(compressTemperature(30)) - 30) > 0.26f) {
+    Serial.println(F("Unit test failed"));
+    flash(100);
+  }
+}
+
+void configureSensors () {
+  sensors.begin();
+  sensors.setWaitForConversion(false);
+  if (!sensors.getAddress(temperatureProbeAddress, 0)) {
+    Serial.println("Could not find temperature sensor!");
+    flash(100);
+  }
+  sensors.requestTemperatures();
+
+  myservo.attach(SERVO);
+}
+
+void configurePins () {
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+
+  digitalWrite(LED2, LOW);
+  digitalWrite(LED3, LOW);
+
+  pinMode(HEAT, OUTPUT);
+  digitalWrite(HEAT, HIGH);
+  delay(100);
+  digitalWrite(HEAT, LOW);
+}
+
+void configureWifi() {
+  while(true) {
+    digitalWrite(LED3, HIGH);
+    delay(50);
+    digitalWrite(LED3, LOW);
+    
+    if (!sendCommand("AT+RST", "ready", 7000)) continue;
+    delay(1000);
+    if (!sendCommand("AT", "OK", 7000)) continue;
+    if (!sendCommand("AT+CWMODE=1","OK")) continue;
+    if (!sendCommand("AT+CWJAP=\"icosikaitetragon\",\"qwertydvorak\"", "OK", 7000)) continue;
+    // sendCommand("AT+CIFSR", "OK");
+    if (!sendCommand("AT+CIPMUX=1","OK")) continue;
+    if (!sendCommand("AT+CIPSERVER=1,80","OK")) continue;
+
+    digitalWrite(LED3, HIGH);
+    break;
+  }
 }
 
 void setup() {
-  Serial.setTimeout(TIMEOUT);
-  
-  // put your setup code here, to run once:
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(2, OUTPUT);
-  digitalWrite(2, HIGH);
-
-  pinMode(7, INPUT);
-  pinMode(6, OUTPUT);
-  
-  //Serial.begin(115200);
   wifi.begin(115200);
-  sendCommand("AT+RST", "ready");
-  delay(3000);
-  sendCommand("AT", "OK");
-  sendCommand("AT+CWMODE=1","OK");
-  sendCommand("AT+CWJAP=\"icosikaitetragon\",\"qwertydvorak\"", "OK");
-  // sendCommand("AT+CIFSR", "OK");
-  sendCommand("AT+CIPMUX=1","OK");
-  sendCommand("AT+CIPSERVER=1,80","OK");
-  flash(10);
+  Serial.setTimeout(TIMEOUT);
+
+  testForSanity();
+  configureSensors();
+  configurePins();
+  configureWifi();
+
+  initComplete = true;
 }
 
 char buffer[BUFFER_SIZE];
@@ -65,23 +276,110 @@ void flash(int times) {
   }
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-  String incomingString = "";
+int failedPolls = 0;
 
-  if (!echoFind("+IPD,0,")) {
-    flash(2);
-    return;
+void pollTemperature() {
+  if (failedPolls >= 5) {
+    failedPolls = 0;
+    conversionIsComplete = true;
+    sensors.requestTemperatures();
   }
 
-  String tmp = wifi.readStringUntil(':');
-  int len = tmp.toInt();
+  if (!conversionIsComplete) {
+    conversionIsComplete = sensors.isConversionComplete();
+  }
+
+  if (conversionIsComplete) {
+    // Bus is very unreliable so we may have to retry several times
+    float temp = sensors.getTempC(temperatureProbeAddress);
+    
+    if(temp == DEVICE_DISCONNECTED_C) {
+      // Received invalid data from temperature probe. Trying again
+      failedPolls++;
+      //Serial.println(F("Received invalid data from temperature probe. Trying again"));
+    } else if (temp < 0) {
+      failedPolls++;
+      Serial.print(F("Found invalid temperature: "));
+      Serial.println(temp);
+    } else {
+      failedPolls = 0;
+      lastTemperature = temp;
+      // Serial.println("Temp: " + String(temp, DEC));
+      conversionIsComplete = false;
+      sensors.requestTemperatures();
+    }
+  }
+}
+
+void loop() {
+  unsigned long ms = millis();
+  
+  if (ms - lastTemperaturePollTick > 200) {
+    pollTemperature();
+    lastTemperaturePollTick = ms;
+  }
+
+  if (ms - lastTemperatureTick > 5000) {
+    lastTemperatureTick = ms;
+    if (temperatureIndex >= TEMPERATURE_BUFFER_SIZE) {
+      // Shift everything by 1 step
+      for (int i = 1; i < TEMPERATURE_BUFFER_SIZE; i++) {
+        temperatureBuffer[i-1] = temperatureBuffer[i];
+      }
+    }
+    temperatureIndex++;
+  }
+
+  // Update the temperature index in the array
+  if (temperatureIndex >= TEMPERATURE_BUFFER_SIZE) {
+    temperatureBuffer[TEMPERATURE_BUFFER_SIZE-1] = compressTemperature(lastTemperature);
+  } else {
+    temperatureBuffer[temperatureIndex] = compressTemperature(lastTemperature);
+  }
+
+  tickSpeed();
+  pollNetwork(true, 'X');
+
+  digitalWrite(HEAT, tickHeat() ? HIGH : LOW);
+
+  if(messageDepth == 0 && !messageQueue.isEmpty()) {
+    //handleMessage(messageQueue.dequeue());
+    unsigned long a = millis();
+    handleMessage(messageQueue.dequeue());
+    unsigned long b = millis();
+    Serial.println(b-a);
+  }
+}
+
+void pollNetwork (bool useGlobalWifiInput, char wifiInput) {
+  pulse(LED3, millis() / 500.0f);
+  if (useGlobalWifiInput ? packetStart.find() : packetStart.find(wifiInput)) {
+    handlePacket();
+  }
+}
+
+int timedRead () {
+  while(!wifi.available());
+  return wifi.read();
+}
+
+void handlePacket () {
+  char channel = (char)timedRead();
+  timedRead(); // Discard comma ','
+
+  int len = wifi.parseInt();
+  char comma = (char)timedRead();
+  assert(':' == comma);
 
   if (len + 1 >= BUFFER_SIZE) {
     // Discard. Message is too large
     for(int i = 0; i < len; i++) wifi.read();
+    response("Message too long", channel);
+    close(channel);
     return;
   }
+
+  // Serial.println("Rec " + String(len,DEC));
   
   int read = 0;
   while (read < len) {
@@ -89,6 +387,22 @@ void loop() {
     // wifi.println("Just read: " + String(read, DEC) + " bytes out of " + String(len, DEC));
   }
 
+  if (messageQueue.count() >= 8) {
+    response("Too many messages too quickly " + String(messageDepth, DEC), channel);
+    close(channel);
+    return;
+  }
+
+  Message message;
+  message.channel = channel;
+
+  if (len == strlen("S=") + sizeof(State) && buffer[0] == 'S' && buffer[1] == '=') {
+    message.type = SetState;
+    memcpy(&message.state, buffer + strlen("S="), sizeof(State));
+    messageQueue.enqueue(message);
+    return;
+  }
+  
   // Ensure the message did not contain any null bytes
   for(int i = 0; i < len; i++) {
     if(buffer[i] == '\0') {
@@ -98,52 +412,230 @@ void loop() {
 
   // Null-terminate the string
   buffer[len] = '\0';
-  
-  //println("Received String: " + incomingString);
-  //println("Hash: " + String(hash,DEC));
-  //flush();
 
-  incomingString = String(buffer);
-  if(len != incomingString.length()) {
-    response("INTERNAL SERVER ERROR " + String(len,DEC) + " != " + String(incomingString.length(),DEC));
+  if (startsWith(buffer, "GET TEMPERATURES")) {
+    message.type = GetTemperatures;
+  } else if (startsWith(buffer, "fasten")) {
+    message.type = Fasten;
+  } else if (startsWith(buffer, "unfasten")) {
+    message.type = Unfasten;
+  } else if (startsWith(buffer, "LED=ON")) {
+    message.type = EnableLED;
+  } else if (startsWith(buffer, "LED=OFF")) {
+    message.type = DisableLED;
+  } else {
+    response("Unknown message", channel);
+    close(channel);
     return;
   }
+  
+  messageQueue.enqueue(message);
+  //Serial.print(F("Message queue size: "));
+  //Serial.println(messageQueue.count());
+  //myservo.write(incomingString.toInt());
+}
 
-  // String output = String("Received string: ") + buffer + " (length: " + String(len, DEC) + ")\n";
-  response("OK\n");
-  if (incomingString.indexOf("LED=ON") != -1) {
-    digitalWrite(LED, HIGH);
-  }
+bool startsWith(const char* str, const char* needle) {
+  return strncmp(str, needle, strlen(needle)) == 0;
+}
 
-  if (incomingString.indexOf("LED=OFF") != -1) {
-    digitalWrite(LED, LOW);
+void writei32toWifi(i32 v) {
+  wifi.write((byte*)&v, 4);
+}
+
+void handleMessage (struct Message message) {
+  char channel = message.channel;
+  switch(message.type) {
+    case SetState: {
+      state = message.state;
+      response("OK", channel);
+      close(channel);
+      break;
+    }
+    case GetTemperatures: {
+      int temperatureValues = temperatureIndex + 1;
+      int bytesToSend = min(TEMPERATURE_BUFFER_SIZE, temperatureValues);
+      wifi.print("AT+CIPSEND=");
+      wifi.write(channel);
+      wifi.write(',');
+      wifi.println(bytesToSend + 4,DEC);
+      listenForACK("Send T", "OK", 500);
+      writei32toWifi(temperatureValues - bytesToSend);
+      wifi.write(temperatureBuffer, bytesToSend);
+      listenForACK("Send T+", "SEND OK", 1000);
+      close(channel);
+      break;
+    }
+    case Fasten: {
+      response("OK", channel);
+      close(channel);
+      targetSpeed = 2;
+      break;
+    }
+    case Unfasten: {
+      response("OK", channel);
+      close(channel);
+      targetSpeed = -2;
+      break;
+    }
+    case EnableLED: {
+      digitalWrite(LED, HIGH);
+      response("OK", channel);
+      close(channel);
+      break;
+    }
+    case DisableLED: {
+      digitalWrite(LED, LOW);
+      response("OK", channel);
+      close(channel);
+      break;
+    }
   }
 }
 
-void response(String data) {
-  sendCommand("AT+CIPSEND=0," + String(data.length(),DEC), "OK");
+void responsiveDelay(int ms) {
+  if (initComplete) {
+    wifi.println("Ticking...");
+    messageDepth++;
+    unsigned long end = millis() + ms;
+    while(millis() < end) {
+      digitalWrite(LED2, HIGH);
+      loop();
+      digitalWrite(LED2, LOW);
+    }
+    messageDepth--;
+  } else {
+    delay(ms);
+  }
+}
+
+void close(char channel) {
+  wifi.print(F("AT+CIPCLOSE="));
+  wifi.write(channel);
+  wifi.println();
+  listenForACK("Close", "OK");
+}
+
+void response(const char* data, char channel) {
+  //sendCommand("AT+CIPSEND=" + String(channel) + "," + String(data.length(),DEC), "OK");
+  //sendCommand(data, "SEND OK");
+  
+  wifi.print(F("AT+CIPSEND="));
+  wifi.write(channel);
+  wifi.write(',');
+  wifi.println(strlen(data));
+  listenForACK("Send...", "OK");
   sendCommand(data, "SEND OK");
 }
 
-boolean sendCommand(String cmd, const char* ack){
-  // println("Sending: " + cmd);
-  wifi.println(cmd); // Send "AT+" command to module
-  if(!echoFind(ack)) {
-    println("Command '" + cmd + "' timed out");
+void response(String data, char channel) {
+  //sendCommand("AT+CIPSEND=" + String(channel) + "," + String(data.length(),DEC), "OK");
+  //sendCommand(data, "SEND OK");
+  
+  wifi.print(F("AT+CIPSEND="));
+  wifi.write(channel);
+  wifi.write(',');
+  wifi.println(data.length());
+  listenForACK("Send...", "OK");
+  sendCommand(data, "SEND OK");
+}
 
-    for(int i = 0; i < 100; i++) {
-      digitalWrite(LED, LOW);
-      delay(50);
-      digitalWrite(LED, HIGH);
-      delay(50);
+boolean sendCommand(const char* cmd, const char* ack){
+  wifi.println(cmd);
+  return listenForACK(cmd, ack);
+}
+
+boolean sendCommand(String& cmd, const char* ack){
+  wifi.println(cmd);
+  return listenForACK(cmd, ack, 5000);
+}
+
+boolean sendCommand(const char* cmd, const char* ack, int timeout){
+  wifi.println(cmd); // Send "AT+" command to module
+  return listenForACK(cmd, ack, timeout);
+}
+
+boolean listenForACK(const char* cmd, const char* ack) {
+  return listenForACK(cmd, ack, 5000);
+}
+
+boolean listenForACK(const char* cmd, const char* ack, int timeout) {
+  if(!echoFind(ack, timeout)) {
+    Serial.print(F("Command '"));
+    Serial.print(cmd);
+    Serial.println(F("' timed out"));
+
+    int startMillis = millis();
+    while(millis() - startMillis < 3500) {
+      pulse(LED2, (millis() - startMillis) / 100.0);
     }
+    digitalWrite(LED2, LOW);
     return false;
   }
   return true;
 }
 
-boolean echoFind(const char* keyword){
-  return Serial.find((char*)keyword);
+
+boolean listenForACK(String& cmd, const char* ack, int timeout) {
+  if(!echoFind(ack, timeout)) {
+    Serial.print(F("Command '"));
+    Serial.print(cmd);
+    Serial.println(F("' timed out"));
+
+    int startMillis = millis();
+    while(millis() - startMillis < 3500) {
+      pulse(LED2, (millis() - startMillis) / 100.0);
+    }
+    digitalWrite(LED2, LOW);
+    return false;
+  }
+  return true;
+}
+
+void pulse(int pin, float t) {
+  float alpha = sin(t*0.5);
+  alpha *= alpha;
+  analogWrite(pin, (int)(alpha*255));
+}
+
+boolean echoFind(const char* keyword, int timeout){
+  Finder finder(keyword);
+  unsigned long startMillis = millis();
+  unsigned long lastMillis = lastMillis;
+  int cnt = 0;
+  int ledDelay = 400;
+  while(true) {
+    while(wifi.available()) {
+      int data = wifi.read();
+      if(finder.find(data)) {
+        digitalWrite(LED2, LOW);
+        return true;
+      }
+
+      if (initComplete) {
+        messageDepth++;
+        pollNetwork(false, data);
+        messageDepth--;
+      }
+    }
+
+    cnt = (cnt + 1) % 255;
+    unsigned long elapsed = millis() - startMillis;
+    if (elapsed > ledDelay) {
+      pulse(LED2, (elapsed - ledDelay) / 500.0);
+    }
+
+    //digitalWrite(LED_BUILTIN, cnt > );
+    //if (millis() - lastMillis > 1) {
+    //  digitalWrite(LED_BUILTIN, (millis() - startMillis) % 255);
+    if (elapsed > timeout) {
+      digitalWrite(LED2, LOW);
+      return false;
+    }
+    //}
+  }
+
+  //return Serial.find((char*)keyword);
   /*
   byte current_char = 0;
   byte keyword_length = keyword.length();
