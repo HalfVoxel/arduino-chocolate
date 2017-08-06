@@ -72,7 +72,7 @@ struct State {
 OneWire ds(9);
 // Pass our oneWire reference to Dallas Temperature.
 DallasTemperature sensors(&ds);
-Servo myservo;
+Servo servo;
 
 Finder packetStart("+IPD,");
 
@@ -129,7 +129,7 @@ struct MessageQueue {
   
   void enqueue(Message& message) {
     assert(!isFull());
-    buffer[start + cnt] = message;
+    buffer[(start + cnt) & (MessageQueueSize - 1)] = message;
     cnt++;
   }
 
@@ -197,7 +197,7 @@ void tickSpeed () {
 
   targetSpeed += (NORMAL_SPEED - targetSpeed)*0.0001*dt;
   speed += (targetSpeed - speed)*0.001*dt;
-  myservo.write(speed * SPEED_MULTIPLIER + SPEED_ZERO);
+  servo.write(speed * SPEED_MULTIPLIER + SPEED_ZERO);
 }
 
 void testForSanity() {
@@ -216,7 +216,7 @@ void configureSensors () {
   }
   sensors.requestTemperatures();
 
-  myservo.attach(SERVO);
+  servo.attach(SERVO);
 }
 
 void configurePins () {
@@ -387,7 +387,7 @@ void handlePacket () {
     // wifi.println("Just read: " + String(read, DEC) + " bytes out of " + String(len, DEC));
   }
 
-  if (messageQueue.count() >= 8) {
+  if (messageQueue.count() >= MessageQueueSize) {
     response("Too many messages too quickly " + String(messageDepth, DEC), channel);
     close(channel);
     return;
@@ -432,7 +432,7 @@ void handlePacket () {
   messageQueue.enqueue(message);
   //Serial.print(F("Message queue size: "));
   //Serial.println(messageQueue.count());
-  //myservo.write(incomingString.toInt());
+  //servo.write(incomingString.toInt());
 }
 
 bool startsWith(const char* str, const char* needle) {
@@ -625,37 +625,9 @@ boolean echoFind(const char* keyword, int timeout){
       pulse(LED2, (elapsed - ledDelay) / 500.0);
     }
 
-    //digitalWrite(LED_BUILTIN, cnt > );
-    //if (millis() - lastMillis > 1) {
-    //  digitalWrite(LED_BUILTIN, (millis() - startMillis) % 255);
     if (elapsed > timeout) {
       digitalWrite(LED2, LOW);
       return false;
     }
-    //}
   }
-
-  //return Serial.find((char*)keyword);
-  /*
-  byte current_char = 0;
-  byte keyword_length = keyword.length();
-  long deadline = millis() + TIMEOUT;
-  String buff = "";
-  while(millis() < deadline){
-    if (wifi.available()){
-      char ch = wifi.read();
-
-      //buff += ch;
-      if (ch == keyword[current_char]) {
-        if (++current_char == keyword_length){
-          println("Read: '" + buff + "'");
-          println("-> Found ACK");
-          return true;
-        }
-      }
-    }
-  }
-  println("Read: " + buff);
-  println();
-  return false; // Timed out*/
 }
