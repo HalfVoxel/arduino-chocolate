@@ -168,9 +168,10 @@ bool conversionIsComplete = false;
 DeviceAddress temperatureProbeAddress;
 float speed = 0;
 float targetSpeed = 1;
+unsigned long changedSpeedStartTime = 0;
 #define NORMAL_SPEED 1
 #define SPEED_MULTIPLIER 100
-#define SPEED_ZERO 1505
+#define SPEED_ZERO 1550
 
 bool tickHeat () {
   switch(state.stage) {
@@ -192,12 +193,21 @@ bool tickHeat () {
 
 unsigned long lastSpeedTick = 0;
 void tickSpeed () {
-  unsigned long dt = millis() - lastSpeedTick;
-  lastSpeedTick = millis();
-
-  targetSpeed += (NORMAL_SPEED - targetSpeed)*0.0001*dt;
-  speed += (targetSpeed - speed)*0.001*dt;
-  servo.write(speed * SPEED_MULTIPLIER + SPEED_ZERO);
+  unsigned long dt = min(millis() - lastSpeedTick, 100);
+  if (dt > 10) {
+    lastSpeedTick = millis();
+  
+    if (millis() - changedSpeedStartTime > 8000) {
+      targetSpeed = NORMAL_SPEED;
+    }
+  
+    //targetSpeed += (NORMAL_SPEED - targetSpeed)*0.0004*dt;
+    //speed += (targetSpeed - speed)*0.002*dt;
+    float delta = min(abs(targetSpeed - speed), 4 * 0.001 * dt);
+    float ds = (targetSpeed > speed ? delta : -delta);
+    speed += ds;
+    servo.write((speed * SPEED_MULTIPLIER) + SPEED_ZERO);
+  }
 }
 
 void testForSanity() {
@@ -217,6 +227,7 @@ void configureSensors () {
   sensors.requestTemperatures();
 
   servo.attach(SERVO);
+  tickSpeed();
 }
 
 void configurePins () {
@@ -343,11 +354,7 @@ void loop() {
   digitalWrite(HEAT, tickHeat() ? HIGH : LOW);
 
   if(messageDepth == 0 && !messageQueue.isEmpty()) {
-    //handleMessage(messageQueue.dequeue());
-    unsigned long a = millis();
     handleMessage(messageQueue.dequeue());
-    unsigned long b = millis();
-    Serial.println(b-a);
   }
 }
 
@@ -469,13 +476,15 @@ void handleMessage (struct Message message) {
     case Fasten: {
       response("OK", channel);
       close(channel);
-      targetSpeed = 2;
+      targetSpeed = 4;
+      changedSpeedStartTime = millis();
       break;
     }
     case Unfasten: {
       response("OK", channel);
       close(channel);
       targetSpeed = -2;
+      changedSpeedStartTime = millis();
       break;
     }
     case EnableLED: {
