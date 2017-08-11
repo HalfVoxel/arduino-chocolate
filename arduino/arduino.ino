@@ -181,8 +181,18 @@ bool tickHeat () {
     case CoolToLow:
       if (lastTemperature < state.lowTemp) state.stage = KeepAtFinal;
       return false;
-    case KeepAtFinal:
-      return lastTemperature < state.finalTemp;
+    case KeepAtFinal: {
+      bool heat = lastTemperature < state.finalTemp;
+      
+      // Only keep the lamp on a fraction of the time when close to the target destination
+      // to avoid overshoot
+      float fraction = (state.finalTemp - lastTemperature) / 3f;
+      fraction = min(max(fraction, 0), 1);
+  
+      int period = 30 * 1000;
+      heat &= fraction > (millis() % period) / (float)period;
+      return heat;
+    }
     case AlwaysOn:
       return true;
     case AlwaysOff:
