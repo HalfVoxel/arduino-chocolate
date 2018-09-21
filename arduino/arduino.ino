@@ -57,6 +57,12 @@ struct Finder {
   }
 };
 
+enum EnabledState : i32 {
+  Off = 0,
+  On = 1,
+  Auto = 2,
+}
+
 enum Stage : i32 {
   AlwaysOff = -1,
   HeatToHigh = 0,
@@ -157,18 +163,16 @@ bool initComplete = false;
 static int maxT = 80;
 static int minT = 20;
 
-int messageDepth = 0;
-
-char compressTemperature(float t) {
+unsigned char compressTemperature(float t) {
   int tmap = (int)((t - minT) * (255.0f / (maxT - minT)));
-  return (char)max(min(tmap, 255), 0);
+  return (unsigned char)max(min(tmap, 255), 0);
 }
 
-float decompressTemperature(char t) {
+float decompressTemperature(unsigned char t) {
   return t * ((maxT - minT) / 255.0f) + minT;
 }
 
-char temperatureBuffer[TEMPERATURE_BUFFER_SIZE];
+unsigned char temperatureBuffer[TEMPERATURE_BUFFER_SIZE];
 i32 temperatureIndex = 0;
 float lastTemperature = 0;
 unsigned long lastTemperatureTick = 0;
@@ -184,13 +188,13 @@ float targetSpeed = NORMAL_SPEED;
 
 void setAutoFans(bool on) {
   switch (state.fanState) {
-    case 0:
+    case Off:
       digitalWrite(Fans, LOW);
       break;
-    case 1:
+    case On:
       digitalWrite(Fans, HIGH);
       break;
-    case 2:
+    case Auto:
     default: {
       digitalWrite(Fans, on ? HIGH : LOW);
       break;
@@ -219,32 +223,6 @@ void setHeating(int heat) {
 }
 
 void tickHeat () {
-  /*switch (state.stage) {
-    case HeatToHigh:
-      if (lastTemperature > state.highTemp) state.stage = CoolToLow;
-      return true;
-    case CoolToLow:
-      if (lastTemperature < state.lowTemp) state.stage = KeepAtFinal;
-      return false;
-    case KeepAtFinal: {
-        bool heat = lastTemperature < state.finalTemp;
-
-        // Only keep the lamp on a fraction of the time when close to the target destination
-        // to avoid overshoot
-        float fraction = (state.finalTemp - lastTemperature) / 3.0f;
-        fraction = min(max(fraction, 0), 1);
-
-        int period = 30 * 1000;
-        heat &= fraction > (millis() % period) / (float)period;
-        return heat;
-      }
-    case AlwaysOn:
-      return true;
-    case AlwaysOff:
-    default:
-      return false;
-
-  }*/
   switch(state.heatState) {
     case 0:
     default:
@@ -259,28 +237,33 @@ void tickHeat () {
     case 2:
       switch(state.temperingStage) {
         default:
+        case AlwaysOff:
           setHeating(0);
           break;
-        case 0:
+        case HeatToHigh:
           // Heating
           setHeating(1);
           break;
-        case 1:
+        case CoolToLow:
           // Cooling
           setHeating(-1);
           break;
-        case 2:
+        case KeepAtFinal:
           // Keep temperature
-          bool heat = lastTemperature < state.finalTemp;
+          if (lastTemperature > state.finalTemp) {
+            setHeating(-1);
+          } else {
+            bool heat = true;
 
-          // Only keep the lamp on a fraction of the time when close to the target destination
-          // to avoid overshoot
-          float fraction = (state.finalTemp - lastTemperature) / 3.0f;
-          fraction = min(max(fraction, 0), 1);
+            // Only keep the heater on a fraction of the time when close to the target destination
+            // to avoid overshoot
+            float fraction = (state.finalTemp - lastTemperature) / 3.0f;
+            fraction = min(max(fraction, 0), 1);
 
-          int period = 30 * 1000;
-          heat &= fraction > (millis() % period) / (float)period;
-          setHeating(heat ? 1 : -1);
+            int period = 30 * 1000;
+            heat &= fraction > (millis() % period) / (float)period;
+            setHeating(heat ? 1 : -1);
+          }
           break;
       }
       break;
@@ -298,11 +281,12 @@ void tickSpeed () {
     }*/
 
     switch (state.motorState) {
-      case 0:
+      default:
+      case Off:
         targetSpeed = 0;
         break;
-      case 1:
-      case 2:
+      case On:
+      case Auto:
         targetSpeed = NORMAL_SPEED;
         break;
     }
@@ -332,8 +316,6 @@ void configureSensors () {
   }
   sensors.requestTemperatures();
 
-  //Motor.attach(Motor);*/
-
   tickSpeed();
 }
 
@@ -350,7 +332,6 @@ void configurePins () {
   pinMode(Motor, OUTPUT);
   pinMode(Fans, OUTPUT);
 
-  //digitalWrite(HEAT, HIGH);
   analogWrite(Motor, 20);
   analogWrite(Fans, 20);
   delay(1000);
@@ -361,53 +342,6 @@ void configurePins () {
   digitalWrite(Fans, LOW);
   digitalWrite(Motor, LOW);
   delay(2000);
-  // digitalWrite(HEAT, LOW);
-}
-
-void configureWifi() {
-  /*int WIFI_RST = 7;
-  pinMode(WIFI_RST, OUTPUT);
-  while (true) {
-    digitalWrite(LED3, HIGH);
-    digitalWrite(WIFI_RST, HIGH);
-    delay(200);
-    digitalWrite(WIFI_RST, LOW);
-    digitalWrite(LED3, LOW);
-    delay(200);
-
-    if (!sendCommand("AT+RST", "ready", 7000)) continue;
-    digitalWrite(LED2, HIGH);
-    delay(1000);
-    digitalWrite(LED2, LOW);
-    if (!sendCommand("AT", "OK", 7000)) continue;
-    if (!sendCommand("AT+CWMODE=1", "OK")) continue;
-    if (!sendCommand("AT+CWJAP=\"Stockholm Makerspace\",\"jagvetinte\"", "OK", 7000)) continue;
-    // sendCommand("AT+CIFSR", "OK");
-    //if (!sendCommand("AT+CIPMUX=1", "OK")) continue;
-    if (!sendCommand("AT+CIPMUX=0", "OK")) continue;
-    //if (!sendCommand("AT+CIPSERVER=1,80", "OK")) continue;
-
-    flash(5);
-    sendCommand("AT+CIPSTART=TCP,104.131.28.95,8002", "OK");
-    delay(100);
-    flash(5);
-    sendCommand("AT+CIPSEND=7", "OK");
-    delay(100);
-    flash(5);
-    sendCommand("Heeelooo", "SEND OK");
-    delay(100);
-
-    
-    sendCommand("AT+CIPCLOSE", "OK");
-    delay(100);
-    // response(, 0);
-    // close(0);
-    flash(5);
-    
-    digitalWrite(LED3, HIGH);
-    flash(20);
-    break;
-  }*/
 }
 
 void setup() {
@@ -417,7 +351,6 @@ void setup() {
   testForSanity();
   configurePins();
   configureSensors();
-  configureWifi();
 
   initComplete = true;
 }
@@ -431,6 +364,12 @@ void flash(int times) {
     digitalWrite(LED, LOW);
     delay(50);
   }
+}
+
+void pulse(int pin, float t) {
+  float alpha = sin(t * 0.5);
+  alpha *= alpha;
+  analogWrite(pin, (int)(alpha * 255));
 }
 
 int failedPolls = 0;
@@ -462,16 +401,14 @@ void pollTemperature() {
     } else {
       failedPolls = 0;
       lastTemperature = temp;
-      Serial.println("Temp: " + String(temp, DEC));
+      //Serial.println("Temp: " + String(temp, DEC));
       conversionIsComplete = false;
       sensors.requestTemperatures();
     }
   }
 }
 
-void loop() {
-  unsigned long ms = millis();
-
+void tickTemperature() {
   if (ms - lastTemperaturePollTick > 200) {
     pollTemperature();
     lastTemperaturePollTick = ms;
@@ -494,20 +431,25 @@ void loop() {
   } else {
     temperatureBuffer[temperatureIndex] = compressTemperature(lastTemperature);
   }
+}
 
+void loop() {
+  unsigned long ms = millis();
+
+  tickTemperature();
   tickSpeed();
-  pollNetwork(true, 'X');
+  pollNetwork();
 
   tickHeat();
 
-  if (messageDepth == 0 && !messageQueue.isEmpty()) {
+  if (!messageQueue.isEmpty()) {
     handleMessage(messageQueue.dequeue());
   }
 }
 
-void pollNetwork (bool useGlobalWifiInput, char wifiInput) {
+void pollNetwork () {
   pulse(LED3, millis() / 500.0f);
-  if (useGlobalWifiInput ? packetStart.find() : packetStart.find(wifiInput)) {
+  if (packetStart.find()) {
     handlePacket();
   }
 }
@@ -518,37 +460,33 @@ int timedRead () {
 }
 
 void handlePacket () {
-  char channel = 0; //(char)timedRead();
-  //timedRead(); // Discard comma ','
-
   int len = wifi.parseInt();
-  char comma = (char)timedRead();
-  assert(':' == comma);
+  char colon = (char)timedRead();
+  if (colon != ':') {
+    flash(10);
+    return;
+  }
 
   if (len + 1 >= BUFFER_SIZE) {
     // Discard. Message is too large
     for (int i = 0; i < len; i++) wifi.read();
-    response("Message too long", channel);
-    close(channel);
+    response("Message too long");
+    close();
     return;
   }
-
-  // Serial.println("Rec " + String(len,DEC));
 
   int read = 0;
   while (read < len) {
     read += wifi.readBytes(buffer + read, len - read);
-    // wifi.println("Just read: " + String(read, DEC) + " bytes out of " + String(len, DEC));
   }
 
   if (messageQueue.count() >= MessageQueueSize) {
-    response("Too many messages too quickly " + String(messageDepth, DEC), channel);
-    close(channel);
+    response("Too many messages too quickly ");
+    close();
     return;
   }
 
   Message message;
-  message.channel = channel;
 
   if (len == strlen("S=") + sizeof(State) && buffer[0] == 'S' && buffer[1] == '=') {
     message.type = SetState;
@@ -569,10 +507,6 @@ void handlePacket () {
 
   if (startsWith(buffer, "GET TEMPERATURES")) {
     message.type = GetTemperatures;
-  } else if (startsWith(buffer, "fasten")) {
-    message.type = Fasten;
-  } else if (startsWith(buffer, "unfasten")) {
-    message.type = Unfasten;
   } else if (startsWith(buffer, "LED=ON")) {
     message.type = EnableLED;
   } else if (startsWith(buffer, "LED=OFF")) {
@@ -586,9 +520,6 @@ void handlePacket () {
   }
 
   messageQueue.enqueue(message);
-  //Serial.print(F("Message queue size: "));
-  //Serial.println(messageQueue.count());
-  //Motor.write(incomingString.toInt());
 }
 
 bool startsWith(const char* str, const char* needle) {
@@ -600,205 +531,54 @@ void writei32toWifi(i32 v) {
 }
 
 void handleMessage (struct Message message) {
-  char channel = message.channel;
   switch (message.type) {
     case SetState: {
         state = message.state;
-        response("OK", channel);
+        response("OK");
         Serial.print("Set state ");
         Serial.print(state.heatState, DEC);
         Serial.print(" ");
         Serial.println(state.fanState, DEC);
-        close(channel);
+        close();
         break;
       }
     case GetTemperatures: {
         int temperatureValues = temperatureIndex + 1;
         int bytesToSend = min(TEMPERATURE_BUFFER_SIZE, temperatureValues);
-        //wifi.print("AT+CIPSEND=");
-        //wifi.write(channel);
-        //wifi.write(',');
         wifi.print("T:");
         wifi.print(bytesToSend, DEC);
         wifi.print(" ");
-        //listenForACK("Send T", "OK", 500);
         wifi.print(temperatureValues - bytesToSend, DEC);
         for (int i = 0; i < bytesToSend; i++) {
           wifi.print(" ");
           wifi.print(temperatureBuffer[i], DEC);
         }
-        //wifi.write(temperatureBuffer, bytesToSend);
-        //listenForACK("Send T+", "SEND OK", 1000);
-        close(channel);
-        break;
-      }
-    case Fasten: {
-        response("OK", channel);
-        close(channel);
-        targetSpeed = 4;
-        changedSpeedStartTime = millis();
-        break;
-      }
-    case Unfasten: {
-        response("OK", channel);
-        close(channel);
-        targetSpeed = -2;
-        changedSpeedStartTime = millis();
+        close();
         break;
       }
     case EnableLED: {
         digitalWrite(LED, HIGH);
-        response("OK", channel);
-        close(channel);
+        response("OK");
+        close();
         break;
       }
     case DisableLED: {
         digitalWrite(LED, LOW);
-        response("OK", channel);
-        close(channel);
+        response("OK");
+        close();
         break;
       }
-  }
-}
-
-void responsiveDelay(int ms) {
-  if (initComplete) {
-    wifi.println("Ticking...");
-    messageDepth++;
-    unsigned long end = millis() + ms;
-    while (millis() < end) {
-      digitalWrite(LED2, HIGH);
-      loop();
-      digitalWrite(LED2, LOW);
-    }
-    messageDepth--;
-  } else {
-    delay(ms);
   }
 }
 
 void close(char channel) {
   wifi.println();
-//  wifi.print(F("AT+CIPCLOSE="));
-//  wifi.write(channel);
-//  wifi.println();
-//  listenForACK("Close", "OK");
 }
 
-void response(const char* data, char channel) {
-  //sendCommand("AT+CIPSEND=" + String(channel) + "," + String(data.length(),DEC), "OK");
-  //sendCommand(data, "SEND OK");
-
-//  wifi.print(F("AT+CIPSEND="));
-//  wifi.write(channel);
-//  wifi.write(',');
-//  wifi.println(strlen(data));
-//  listenForACK("Send...", "OK");
-//  sendCommand(data, "SEND OK");
+void response(const char* data) {
     wifi.println(data);
 }
 
-void response(String data, char channel) {
-  //sendCommand("AT+CIPSEND=" + String(channel) + "," + String(data.length(),DEC), "OK");
-  //sendCommand(data, "SEND OK");
-
-//  wifi.print(F("AT+CIPSEND="));
-//  wifi.write(channel);
-//  wifi.write(',');
-//  wifi.println(data.length());
-//  listenForACK("Send...", "OK");
-//  sendCommand(data, "SEND OK");
+void response(String data) {
     wifi.println(data);
 }
-
-/*boolean sendCommand(const char* cmd, const char* ack) {
-  wifi.println(cmd);
-  return listenForACK(cmd, ack);
-}
-
-boolean sendCommand(String& cmd, const char* ack) {
-  wifi.println(cmd);
-  return listenForACK(cmd, ack, 5000);
-}
-
-boolean sendCommand(const char* cmd, const char* ack, int timeout) {
-  wifi.println(cmd); // Send "AT+" command to module
-  return listenForACK(cmd, ack, timeout);
-}
-
-boolean listenForACK(const char* cmd, const char* ack) {
-  return listenForACK(cmd, ack, 5000);
-}
-
-boolean listenForACK(const char* cmd, const char* ack, int timeout) {
-  if (!echoFind(ack, timeout)) {
-    //Serial.print(F("Command '"));
-    //Serial.print(cmd);
-    //Serial.println(F("' timed out"));
-
-    int startMillis = millis();
-    while (millis() - startMillis < 3500) {
-      pulse(LED2, (millis() - startMillis) / 100.0);
-    }
-    digitalWrite(LED2, LOW);
-    return false;
-  }
-  return true;
-}
-
-
-boolean listenForACK(String& cmd, const char* ack, int timeout) {
-  if (!echoFind(ack, timeout)) {
-    Serial.print(F("Command '"));
-    Serial.print(cmd);
-    Serial.println(F("' timed out"));
-
-    int startMillis = millis();
-    while (millis() - startMillis < 3500) {
-      pulse(LED2, (millis() - startMillis) / 100.0);
-    }
-    digitalWrite(LED2, LOW);
-    return false;
-  }
-  return true;
-}*/
-
-void pulse(int pin, float t) {
-  float alpha = sin(t * 0.5);
-  alpha *= alpha;
-  analogWrite(pin, (int)(alpha * 255));
-}
-
-/*boolean echoFind(const char* keyword, int timeout) {
-  Finder finder(keyword);
-  unsigned long startMillis = millis();
-  unsigned long lastMillis = lastMillis;
-  int cnt = 0;
-  int ledDelay = 400;
-  while (true) {
-    while (wifi.available()) {
-      int data = wifi.read();
-      if (finder.find(data)) {
-        digitalWrite(LED2, LOW);
-        return true;
-      }
-
-      if (initComplete) {
-        messageDepth++;
-        pollNetwork(false, data);
-        messageDepth--;
-      }
-    }
-
-    cnt = (cnt + 1) % 255;
-    unsigned long elapsed = millis() - startMillis;
-    if (elapsed > ledDelay) {
-      pulse(LED2, (elapsed - ledDelay) / 500.0);
-    }
-
-    if (elapsed > timeout) {
-      digitalWrite(LED2, LOW);
-      return false;
-    }
-  }
-}*/
